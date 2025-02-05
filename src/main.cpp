@@ -1,8 +1,8 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Utilizes PID Library by Brett Beuregard, 
-                      Uses sliding window for PWM averaging to reduce lag    
+    Notes:            Only implements PID within the smaller integrations
+                      brake before incorporating PID temporarily
 */
 //Librarys Included
 #include <PID_v1.h>
@@ -22,7 +22,7 @@
   //(MOTOR CONTROL)
     //error value
     int error = 0; //int so that no decimals
-    int tolerance = 1; //to provide deadband around setpoint 
+    int tolerance = 5; //to provide deadband around setpoint 
     //motor output variables
     int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
     int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
@@ -34,6 +34,19 @@
     #define greenLED D4
     //OVERSHOOT CHECKING
     #define setpointMet D7
+    //Switch Values
+    int motorSwitch = 0;
+    #define B 0
+    #define LCW 1
+    #define LACW 2
+    #define FCW 3
+    #define FACW 4
+    #define DELAY_FCW 5
+    #define DELAY_FACW 6
+    //Delay Variables
+    unsigned long FCWdelayStart = 0; 
+    unsigned long FACWdelayStart = 0;
+    const long delayInterval = 1000; //time delay
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //position variables
@@ -57,13 +70,16 @@
   //mapping PWM Variables 
   double mappedPWM = 0; //variable for mapping PWM value to motor position value
   double maxWidth = 4000; //max us pulse can be (dependant on frequency used)
-
+  //values found by manually altering pot to exactly 7 turns
+  double lowValue = 0;
+  double highValue = 4096;
+  
   //Adaptive PID Variables
-  double kp = 2, ki = 0, kd = 0; 
-
+  int rotationBand = 409; //Error < than this then  step value used
+  double Fkp = 1, Fki = 0.125, Fkd = 0; //rotation step values
   double Setpoint, Feedback, Output;
 
-  PID myPID(&Feedback, &Output, &Setpoint, kp, ki, kd, DIRECT);
+  PID myPID(&Feedback, &Output, &Setpoint, Fkp, Fki, Fkd, DIRECT);
 
 void setup() {
   //(PWM MEASURE)
@@ -71,7 +87,7 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(pulsePin), changingEdgeISR, CHANGE); //Attaches interrupt to the PWM pin
   //(MOTOR CONTROL)
     //setting input pins
-    pinMode(positionFeedback, INPUT);
+    pinMode(positionFeedback, INPUT_PULLDOWN);
     //setting output pins
     pinMode(clockwise, OUTPUT);
     pinMode(anticlockwise, OUTPUT);
@@ -93,6 +109,9 @@ void setup() {
     //set the output limits (default is 0,255)
     myPID.SetOutputLimits(0, 4096);
 
+  //Stop movement on startup due to tolerancing
+    motorSwitch = B;
+
 }
 void loop() {
 
@@ -102,9 +121,15 @@ void loop() {
 
   motorControl();
 
-  excelPlotting();
-  //serialPrinting();
-  
+  //excelPlotting();
+  Serial.print(Setpoint);
+  Serial.print(":");
+  Serial.print(Feedback);
+  Serial.print(":");
+  Serial.print(speed);
+  Serial.print(":");
+  Serial.println(motorSwitch);
+
     }
 
 
@@ -115,31 +140,88 @@ void motorControl(){
   Setpoint = mappedPWM;
   //error value
   error = Setpoint - Feedback;
-
   myPID.Compute();
-
   //speed limit
   speed = abs(Output); //sets speed always a positive number
   if(speed > 255) speed = 255; //upper limit
-  //if(speed < 110) speed = 110; //lower limit (110 no valve 160 with valve)
   
   //set direction and speed according to PID value
-  if (error == 0){
-    digitalWrite(clockwise, 1);
-    digitalWrite(anticlockwise, 1);
-    setColour(255, 0, 255); //green
-  } 
-  if (error > 0 + tolerance){
-    myPID.SetControllerDirection(DIRECT);
-    analogWrite(clockwise, speed);
-    analogWrite(anticlockwise, 0);
-    setColour(255, 0, 100); //torquoise
-  } 
-  if (error < 0 - tolerance){ 
-    myPID.SetControllerDirection(REVERSE);
-    analogWrite(clockwise, 0);
-    analogWrite(anticlockwise, speed);
-    setColour(0, 255, 255); //red
+  //Brake Mode
+  if (error == 0) motorSwitch = B;
+  //Set Large Step Mode
+    //Clockwise Control
+  if (error > 0 + rotationBand) motorSwitch = LCW;
+    //Anticlockwise Control
+  if (error < 0 - rotationBand) motorSwitch = LACW;
+  //Set Small Step Mode
+    //Clockwise Control
+  if ((error < 0 + rotationBand) && (error > 0 + tolerance)){
+    if(motorSwitch != FCW && motorSwitch != DELAY_FCW){ //initially send into the delay function
+      motorSwitch = DELAY_FCW;
+      FCWdelayStart = millis(); //take initial time stamp
+    }
+  }
+    //Anticlockwise Control
+  if ((error > 0 - rotationBand) && (error < 0 - tolerance)){
+    if(motorSwitch != FACW && motorSwitch != DELAY_FACW){ //initially send into the delay function
+    motorSwitch = DELAY_FACW;
+    FACWdelayStart = millis(); //take initial time stamp
+    }
+  }
+
+switch(motorSwitch){
+  //Brake (1)
+  case(B):    Output = 0; //resets ki to reduce creep up
+              myPID.SetTunings(0, 0, 0); //resets ki to reduce creep up
+              digitalWrite(clockwise, 1);
+              digitalWrite(anticlockwise, 1);
+              setColour(255, 0, 255); //green
+              break;
+  //Large Step Clockwise (1)
+  case(LCW):  analogWrite(clockwise, 255);
+              analogWrite(anticlockwise, 0);
+              setColour(255, 0, 100); //torquoise
+              break;
+  //Large Step Anticlockwise (2)
+  case(LACW): analogWrite(clockwise, 0);
+              analogWrite(anticlockwise, 255);
+              setColour(0, 255, 255); //red
+              break;
+  //Full rotation Step Clockwise (3)
+  case(FCW):  myPID.SetTunings(Fkp, Fki, Fkd);
+              myPID.SetControllerDirection(DIRECT);
+              myPID.Compute();
+              analogWrite(clockwise, speed);
+              analogWrite(anticlockwise, 0);
+              setColour(255, 0, 100); //torquoise
+              break;
+  //Full rotation Step Anticlockwise (4)
+  case(FACW): myPID.SetTunings(Fkp, Fki, Fkd);
+              myPID.SetControllerDirection(REVERSE);
+              myPID.Compute();
+              analogWrite(clockwise, 0);
+              analogWrite(anticlockwise, speed);
+              setColour(0, 255, 255); //red
+              break;  
+  //Delay Before Full rotation Step Clockwise (5)
+  case(DELAY_FCW):
+              if(millis() - FCWdelayStart >= delayInterval){ //check whether interval time has passed
+                motorSwitch = FCW; //set 360 rotation values if time passed
+              } else {
+                // Keep the motor in brake mode during the delay
+                digitalWrite(clockwise, 1);
+                digitalWrite(anticlockwise, 1);
+              }
+              break;
+  case(DELAY_FACW):
+              if(millis() - FACWdelayStart >= delayInterval){ //check whether interval time has passed
+                motorSwitch = FACW; //set 360 rotation values if time passed
+              } else {
+                // Keep the motor in brake mode during the delay
+                digitalWrite(clockwise, 1);
+                digitalWrite(anticlockwise, 1);
+              }
+              break;
   }
 }
 
@@ -180,7 +262,9 @@ void SlidingWindow(){
     // Calculate the average
     averageFeedbackValue = potSum / numReadings;
     averagePWMValue = pwmSum / numReadings;
-
+    //Mapping PWM values to match analogReadResolution
+    mappedPWM = map(averagePWMValue, 0, maxWidth, lowValue, highValue);
+ 
   }
 }
 
@@ -193,7 +277,7 @@ void pwmCalculate(){
     storedTimeStamp = currentTime; //stores current value to be compared with next measured value
 
   //Mapping PWM values to match analogReadResolution
-  mappedPWM = map(averagePWMValue, 0, 4000, 23, 4086);
+  mappedPWM = map(averagePWMValue, 0, maxWidth, lowValue, highValue);
 
   }
 }
@@ -206,7 +290,6 @@ void setColour(int redValue, int greenValue, int blueValue) {
 }
 
 void excelPlotting(){
-  
   //Delay function (alter to micros if needed)
   static unsigned long storedTimeStamp = 0;
   unsigned long currentTime = millis(); //stamp of time since arduino started up
@@ -219,22 +302,9 @@ void excelPlotting(){
   Serial.print(Feedback);
   Serial.print(":");
   Serial.println(speed);
-
+ // Serial.print(":");
+  //Serial.println(motorSwitch);
   }
-  
-}
-void serialPrinting(){
-
-    Serial.print(" Setpoint ");
-    Serial.print(Setpoint);
-    Serial.print(" Feedback ");
-    Serial.print(Feedback);
-    Serial.print(" error ");
-    Serial.print(error);
-    Serial.print(" Output ");
-    Serial.print(Output);
-    Serial.print(" Speed ");
-    Serial.println(speed);
 }
 
 
