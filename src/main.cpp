@@ -1,8 +1,7 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Differences from Version 4
-                      doesnt use dynamic tolerance, instead uses similar tolerance to version 1            
+    Notes:            Error has replaced position difference for PID control          
 */
 //Variable Definitions
   
@@ -22,10 +21,9 @@
     volatile long pulseWidthTotal = 0;
     volatile long averagePulseWidth = 0;
    
-    
     //mapping PWM Variables 
-    int mappedPWM = 0; //variable for mapping PWM value to motor position value
-    int maxWidth = 4000; //max us pulse can be (dependant on frequency used)
+    long mappedPWM = 0; //variable for mapping PWM value to motor position value
+    long maxWidth = 4000; //max us pulse can be (dependant on frequency used)
 
   //(MOTOR CONTROL)
     //position variables
@@ -34,22 +32,12 @@
     //motor output variables
     int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
     int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
-    //Switch statement Variables
-    #define ON_TARGET 1
-    #define CLOCKWISE 2
-    #define ANTICLOCKWISE 3
-    int switchValue = 0;
+    //Speed Variables
+    int speed = 0; 
     //LED Indicators
     #define blueLED A2
     #define redLED A3
     #define greenLED D4
-    //tolerancing variables
-    int tolerance = 5; //value for tolerance so can be altered in main program
-    signed int positionDifference; //value for simplified if statement
-    //speed variables
-    int speed = 10; //standard speed 
-    int slowSpeed = 110; //speed within slowing band
-    int slowBand = 100; //band to slow speed hopefully reducing overshoot
     //OVERSHOOT CHECKING
     #define setpointMet D7
 
@@ -65,6 +53,22 @@
     unsigned int potSum = 0; 
     //value for average of array
     unsigned int averageFeedbackValue = 0; 
+
+  //PID 
+  //Gains
+  float kp = 0.1; 
+  float ki = 0.001; //
+  float kd = 0;
+  float u = 0; //PID calculation
+  //delta t variables
+  float deltaT;
+  int currentTime;
+  int previousTime;
+  //error variables
+  long error;
+  float previousError;
+  float eIntegral;
+  float eDerivative;
 
 void setup() {
   //(PWM MEASURE)
@@ -95,6 +99,8 @@ void loop() {
 
   slidingWindow();
   
+  PID();
+
   motorControl();
     
   serialPrinting();
@@ -123,76 +129,52 @@ void pwmCalculate(){
     if (debug_code) Serial.println(averagePulseWidth);
       pulseWidthTotal = 0;   
     }
+  mappedPWM = map(averagePulseWidth, 0, maxWidth, 0, 4096);
 }
 
 //(MOTOR CONTROL)
 void motorControl(){
-    //Mapping PWM values
-    mappedPWM = map(averagePulseWidth, 0, maxWidth, 0, 4096);
-    // Calculate the difference between the current position and the target position
-    positionDifference = (mappedPWM - averageFeedbackValue);
 
-   //designed to stop motor moving until full average calculation complete 
-    // Logic system to control motor rotation and brake 
-    if (abs(positionDifference) == 0) { // If there is no difference between current and target
-        switchValue = ON_TARGET; // Brake if motor in correct position;
-     } 
-    if (positionDifference > (0 + tolerance)) { // 
-          switchValue = CLOCKWISE; // Rotate clockwise
-    } 
-    if (positionDifference < (0 - tolerance)) { // 
-          switchValue = ANTICLOCKWISE; // Rotate anticlockwise
-    }
-
-  switch (switchValue) {
-    case(ON_TARGET):
-      //OVERSHOOT CHECKING
-      digitalWrite(setpointMet, HIGH); //measure using logic analyser then measure 
-
-      analogWrite(clockwise, 255);
-      analogWrite(anticlockwise, 255);
-      setColour(200, 1, 127); //0 = high
-      break;
-
-    case(CLOCKWISE):
-      //OVERSHOOT CHECKING
-      digitalWrite(setpointMet, LOW); //measure using logic analyser then measure 
-
-    if (positionDifference > 0 + slowBand){
-      analogWrite(clockwise, speed);
-      analogWrite(anticlockwise, 0);
-      setColour(0, 1, 255); //0 = high
-    }
-    if (positionDifference < 0 + slowBand){
-      analogWrite(clockwise, slowSpeed);
-      analogWrite(anticlockwise, 0);
-      setColour(0, 1, 255); //0 = high
-    }
-      break;
-    
-    case(ANTICLOCKWISE):
-      //OVERSHOOT CHECKING
-      digitalWrite(setpointMet, LOW); //measure using logic analyser then measure 
-
-    if (positionDifference < 0 - slowBand){
-      analogWrite(clockwise, 0);
-      analogWrite(anticlockwise, speed);
-      setColour(0, 1, 255); //0 = high
-    }
-    if (positionDifference > 0 - slowBand){
-      analogWrite(clockwise, 0);
-      analogWrite(anticlockwise, slowSpeed);
-      setColour(0, 1, 255); //0 = high
-    }
-    break;
-
-    default:
-      analogWrite(clockwise, 255);
-      analogWrite(anticlockwise, 255);
-      setColour(225, 0, 255); //0 = high
-  }
-}
+  //speed limit
+  speed = fabs(u); //sets speed always a positive number
+  if(speed > 255) speed = 255; //upper limit
+  if(speed < 120) speed = 200; //lower limit
   
+  //set direction and speed according to PID value
+  if (u == 0){
+    digitalWrite(clockwise, 1);
+    digitalWrite(anticlockwise, 1);
+    setColour(255, 0, 255); //green
+  } 
+  if (u > 0){
+    analogWrite(clockwise, speed);
+    analogWrite(anticlockwise, 0);
+    setColour(255, 0, 100); //torquoise
+  } 
+  if (u < 0){ 
+    analogWrite(clockwise, 0);
+    analogWrite(anticlockwise, speed);
+    setColour(0, 255, 255); //red
+  }
+
+}
+
+
+//PID Control
+void PID(){
+  //recording deltaT
+  currentTime = micros();
+  deltaT = ((float) currentTime - previousTime) / 1.0e6; //converts to seconds
+  //Proportional, Integral and Derivative
+  error = mappedPWM - averageFeedbackValue; //proportional error
+  eIntegral = eIntegral + error * deltaT; //integral value
+  eDerivative = error - previousError / deltaT; //delta value
+  //PID Calculation
+  u = (kp * error) + (ki * eIntegral) + (kd * eDerivative);
+  //setting values for next iteration
+  previousTime = currentTime;
+  previousError = error;
+}
 
 //AVERAGING
 void slidingWindow(){
@@ -233,10 +215,12 @@ void serialPrinting(){
     Serial.print(mappedPWM);
     Serial.print(" motor position ");
     Serial.print(averageFeedbackValue);
-    Serial.print(" switchValue ");
-    Serial.print(switchValue);
-    Serial.print(" positionDifference ");
-    Serial.println(positionDifference);
+    Serial.print(" error ");
+    Serial.print(error);
+    Serial.print(" PID Value ");
+    Serial.print(u);
+    Serial.print(" Speed ");
+    Serial.println(speed);
 }
 
 
