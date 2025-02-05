@@ -1,7 +1,8 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Follows structure of flow chart              
+    Notes:            Differences from Version 4
+                      doesnt use dynamic tolerance, instead uses similar tolerance to version 1            
 */
 //Variable Definitions
   
@@ -16,14 +17,17 @@
     volatile boolean flag = 0; //used in switch to ensure calculation only occurs on low edge
 
     //averaging Variables
-    volatile int numberOfSamplePulses = 1000;
+    volatile int numberOfSamplePulses = 500;
+     volatile long preventStop = 0; //used to stop delay in motor movement due to pwm average calculation 
     volatile int pulseCount = 0;
     volatile long pulseWidthTotal = 0;
     volatile long averagePulseWidth = 0;
+   
     
     //mapping PWM Variables 
     int mappedPWM = 0; //variable for mapping PWM value to motor position value
-    int maxWidth = 2000; //max us pulse can be (dependant on frequency used)
+    int maxWidth = 4000; //max us pulse can be (dependant on frequency used)
+
   //(MOTOR CONTROL)
     //position variables
     #define positionFeedback A0 //motor rotory feedback from 10 turn POT
@@ -41,10 +45,9 @@
     #define redLED A3
     #define greenLED D4
     //tolerancing variables
-    int toleranceValue = 100; //value for tolerance so can be altered in main program
-    int tolerance = toleranceValue; //actual plus minus value for tolerancing 
-    signed int positionDifference;
-    signed int dynamicTolerance;
+    int toleranceValue = 0; //UNUSED ATM
+    int tolerance = 5; //value for tolerance so can be altered in main program
+    signed int positionDifference; //value for simplified if statement
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //Time delay
@@ -77,9 +80,11 @@ void setup() {
     analogReadResolution(12);
 
   //(SERIAL MONITORING)
-    Serial.begin(9600); //CANNOT BE USED WHEN NOT USING PC (MESSES UP)
+    Serial.begin(9600); 
 }
 void loop() {
+
+  pwmCalculate();
 
   slidingWindow();
   
@@ -100,62 +105,67 @@ void changingEdgeISR(){
                pulseWidth = pulseEndTime - pulseStartTime; 
                pulseCount++;
                pulseWidthTotal += pulseWidth;
-               if(pulseCount >= numberOfSamplePulses) 
-               { pulseCount = 0;
-                 averagePulseWidth = pulseWidthTotal/numberOfSamplePulses; 
-                 if (debug_code) Serial.println(averagePulseWidth);
-                 pulseWidthTotal = 0;}  
-               break;            
+               preventStop++;
+    }
+}
+
+void pwmCalculate(){
+  //function needed to remove delay in calculations
+  if(pulseCount >= numberOfSamplePulses) 
+    { pulseCount = 0;
+    averagePulseWidth = pulseWidthTotal/numberOfSamplePulses; 
+    if (debug_code) Serial.println(averagePulseWidth);
+      pulseWidthTotal = 0;   
     }
 }
 
 //(MOTOR CONTROL)
 void motorControl(){
+    //Mapping PWM values
+    mappedPWM = map(averagePulseWidth, 0, maxWidth, 0, 4096);
     // Calculate the difference between the current position and the target position
-    positionDifference = (averagePulseWidth - averageFeedbackValue);
-    
-    // Calculate the tolerance dynamically based on the position difference
-    dynamicTolerance = max(toleranceValue, abs(positionDifference) / 2); // Ensure dynamicTolerance is always positive
-    
+    positionDifference = (mappedPWM - averageFeedbackValue);
+
+   //designed to stop motor moving until full average calculation complete 
     // Logic system to control motor rotation and brake 
-    if (abs(positionDifference) <= dynamicTolerance) { // If within deadband
-        switchValue = ON_TARGET; // Brake if motor in correct position
+    if (abs(positionDifference) == 0) { // If there is no difference between current and target
+        switchValue = ON_TARGET; // Brake if motor in correct position;
      } 
-    else if (positionDifference > 0) { // If motor is higher than correct position
+    if (positionDifference > (0 + tolerance)) { // 
           switchValue = CLOCKWISE; // Rotate clockwise
     } 
-    else if (positionDifference < 0) { // If motor is lower than correct position
+    if (positionDifference < (0 - tolerance)) { // 
           switchValue = ANTICLOCKWISE; // Rotate anticlockwise
     }
-    
 
   switch (switchValue) {
     case(ON_TARGET):
-      tolerance = dynamicTolerance; //tolerance set again to allow for deadband
-      digitalWrite(clockwise, 1);
-      digitalWrite(anticlockwise, 1);
+      analogWrite(clockwise, 255);
+      analogWrite(anticlockwise, 255);
       setColour(200, 1, 127); //0 = high
       break;
 
     case(CLOCKWISE):
-      digitalWrite(clockwise, 1);
-      digitalWrite(anticlockwise, 0);
+      analogWrite(clockwise, 160);
+      analogWrite(anticlockwise, 0);
       setColour(0, 1, 255); //0 = high
       break;
     
     case(ANTICLOCKWISE):
-      digitalWrite(clockwise, 0);
-      digitalWrite(anticlockwise, 1);
+      analogWrite(clockwise, 0);
+      analogWrite(anticlockwise, 160);
       setColour(0, 1, 255); //0 = high
     break;
 
     default:
-      digitalWrite(clockwise, 1);
-      digitalWrite(anticlockwise, 1);
+      analogWrite(clockwise, 255);
+      analogWrite(anticlockwise, 255);
       setColour(225, 0, 255); //0 = high
   }
 }
+  
 
+//AVERAGING
 void slidingWindow(){
     //Delay function (alter to micros if needed)
   unsigned long currentMicros = micros();//stamp of time since arduino started up
@@ -179,7 +189,7 @@ void slidingWindow(){
 
   }
 }
-
+//LED 
 void setColour(int redValue, int greenValue, int blueValue) {
   analogWrite(redLED, redValue);
   digitalWrite(greenLED, greenValue);
@@ -187,20 +197,19 @@ void setColour(int redValue, int greenValue, int blueValue) {
 }
 
 void serialPrinting(){
-    Serial.print("pulseWidth ");
-    Serial.print(pulseWidth);
+
     Serial.print(" average pulseWidth ");
     Serial.print(averagePulseWidth);
+    Serial.print(" mapped pulseWidth ");
+    Serial.print(mappedPWM);
+    Serial.print(" prevent stop ");
+    Serial.print(preventStop);
     Serial.print(" motor position ");
     Serial.print(averageFeedbackValue);
     Serial.print(" switchValue ");
     Serial.print(switchValue);
-    Serial.print(" dynamic tolerance ");
-    Serial.print(dynamicTolerance);
-    Serial.print(" position difference ");
+    Serial.print(" positionDifference ");
     Serial.println(positionDifference);
-
-
 }
 
 
