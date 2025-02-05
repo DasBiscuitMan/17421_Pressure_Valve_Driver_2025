@@ -22,7 +22,7 @@
   //(MOTOR CONTROL)
     //error value
     int error = 0; //int so that no decimals
-    int tolerance = 0; //to provide deadband around setpoint 
+    int tolerance = 1; //to provide deadband around setpoint 
     //motor output variables
     int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
     int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
@@ -59,14 +59,11 @@
   double maxWidth = 4000; //max us pulse can be (dependant on frequency used)
 
   //Adaptive PID Variables
-  double Lkp = 1, Lki = 0.004, Lkd = 0; //large step values
-  int smallStepBand = 100; //Error < than this then small step values used
-  char smallStepIndicator = 'B'; //Eliminates band entry 
-  double Skp = 10, Ski = 0.5, Skd = 0; //Small step values
+  double kp = 2, ki = 0, kd = 0; 
 
   double Setpoint, Feedback, Output;
 
-  PID myPID(&Feedback, &Output, &Setpoint, Lkp, Lki, Lkd, DIRECT);
+  PID myPID(&Feedback, &Output, &Setpoint, kp, ki, kd, DIRECT);
 
 void setup() {
   //(PWM MEASURE)
@@ -118,17 +115,7 @@ void motorControl(){
   Setpoint = mappedPWM;
   //error value
   error = Setpoint - Feedback;
-  //set small or large tunings and compute PID protocol
-  if((abs(error) < smallStepBand) && (smallStepIndicator != 'L')){ //& means wont go into this band when using large step
-  myPID.SetTunings(Skp, Ski, Skd);
-  //Set flag
-  smallStepIndicator = 'S'; 
-  }
-  else if (abs(error) > smallStepBand && smallStepIndicator != 'S'){}
-  myPID.SetTunings(Lkp, Lki, Lkd);
-  //Set flag
-  smallStepIndicator = 'L';
-  }
+
   myPID.Compute();
 
   //speed limit
@@ -138,7 +125,6 @@ void motorControl(){
   
   //set direction and speed according to PID value
   if (error == 0){
-    smallStepIndicator = 'B'; //Reset Flag
     digitalWrite(clockwise, 1);
     digitalWrite(anticlockwise, 1);
     setColour(255, 0, 255); //green
@@ -207,7 +193,7 @@ void pwmCalculate(){
     storedTimeStamp = currentTime; //stores current value to be compared with next measured value
 
   //Mapping PWM values to match analogReadResolution
-  mappedPWM = map(averagePWMValue, 0, 4000, 0, 4096);
+  mappedPWM = map(averagePWMValue, 0, 4000, 23, 4086);
 
   }
 }
@@ -227,15 +213,13 @@ void excelPlotting(){
   if(currentTime >= storedTimeStamp + 200){ //alter number for delay time wanted
     storedTimeStamp = currentTime; //stores current value to be compared with next measured value
   Serial.print(micros() / 1e6);
-  Serial.print(" ");
+  Serial.print(":");
   Serial.print(Setpoint);
-  Serial.print(" ");
+  Serial.print(":");
   Serial.print(Feedback);
-  Serial.print(" ");
-  Serial.print(speed);
-  Serial.print(" ");
-  Serial.println(smallStepIndicator);
-  
+  Serial.print(":");
+  Serial.println(speed);
+
   }
   
 }
