@@ -1,17 +1,26 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Only implements PID within the smaller integrations
-                      brake before incorporating PID temporarily
+    Notes:            Implementing current sense and calibration
 */
 //Librarys Included
+#include <Arduino.h>
 #include <PID_v1.h>
+
+// Function Prototypes
+void motorControl();
+void computeError();
+void currentSense();
+void changingEdgeISR();
+void SlidingWindow();
+void setColour(int redValue, int greenValue, int blueValue);
+void excelPlotting();
 
 //Variable Definitions
   
   //(PWM MEASURE) 
     //mark to space ratio measuring position variables
-    #define pulsePin D5  // Define the input pin for the pulse signal
+    #define pulsePin D1  // Define the input pin for the pulse signal
     volatile double pulseStartTime = 0; // Variable to store the start time of the pulse (voltatile used to ensure updates in isr)
     volatile double pulseEndTime = 0;   // Variable to store the end time of the pulse
     volatile double pulseWidth = 0;     // Variable to store the pulse width (needs to be motor starting position CALIBRATE)
@@ -29,9 +38,9 @@
     //Speed Variables
     double speed = 0; 
     //LED Indicators
-    #define blueLED A2
-    #define redLED A3
-    #define greenLED D4
+    #define blueLED D4
+    #define redLED D5
+    #define greenLED D6
     //OVERSHOOT CHECKING
     #define setpointMet D7
     //Switch Values
@@ -43,10 +52,14 @@
     #define FACW 4
     #define DELAY_FCW 5
     #define DELAY_FACW 6
+    #define OUT_OF_BOUNDS 7
     //Delay Variables
     unsigned long FCWdelayStart = 0; 
     unsigned long FACWdelayStart = 0;
     const long delayInterval = 1000; //time delay
+    //Outer Limit Values for 7 turns (may need calibrating)
+    double lowerLimit = 408;
+    double upperLimit = 3264;
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //position variables
@@ -70,9 +83,9 @@
   //mapping PWM Variables 
   double mappedPWM = 0; //variable for mapping PWM value to motor position value
   double maxWidth = 4000; //max us pulse can be (dependant on frequency used)
-  //values found by manually altering pot to exactly 7 turns
-  double lowValue = 430;
-  double highValue = 3288;
+  //upper and lower limit values found by manually altering pot 
+  double lowValue = 14;
+  double highValue = 4081;
   
   //Adaptive PID Variables
   int rotationBand = 409; //Error < than this then  step value used
@@ -80,6 +93,11 @@
   double Setpoint, Feedback, Output;
 
   PID myPID(&Feedback, &Output, &Setpoint, Fkp, Fki, Fkd, DIRECT);
+
+  //CURRENT SENSE
+  #define currentSense A3
+  double currentSenseRead = 0;
+
 
 void setup() {
   //(PWM MEASURE)
@@ -109,6 +127,9 @@ void setup() {
     //set the output limits (default is 0,255)
     myPID.SetOutputLimits(0, 4096);
 
+    //CURRENT SENSE
+    pinMode(currentSense, INPUT);
+
   //Stop movement on startup due to tolerancing
     motorSwitch = B;
 
@@ -117,26 +138,36 @@ void loop() {
 
   SlidingWindow();
 
+  computeError();
+
   motorControl();
 
   excelPlotting();
 
+  currentSenseRead = map(analogRead(currentSense),0, 4096, 0, 3300);
+
     }
 
-
-//(MOTOR CONTROL)
-void motorControl(){
+//(COMPUTE AND ERROR MODES)
+void computeError(){
   //Set PID Values to Values defined within program
   Feedback = averageFeedbackValue;
   Setpoint = mappedPWM;
+  //ERROR CHECKING
+  //check whether pwm in has exceeded 10-80% limits
+  if(Setpoint > upperLimit) Setpoint = upperLimit;
+  if(Setpoint < lowerLimit) Setpoint = lowerLimit;
   //error value
   error = Setpoint - Feedback;
   myPID.Compute();
   //speed limit
   speed = abs(Output); //sets speed always a positive number
   if(speed > 255) speed = 255; //upper limit
-  
-  //set direction and speed according to PID value
+}
+
+//(MOTOR CONTROL)
+void motorControl(){
+  //Set direction and speed according to PID value
   //Brake Mode
   if (error == 0) motorSwitch = B;
   //Set Large Step Mode
@@ -159,9 +190,11 @@ void motorControl(){
     FACWdelayStart = millis(); //take initial time stamp
     }
   }
+    //Out of Bounds Error Mode
+  if(Feedback > upperLimit || Feedback < lowerLimit) motorSwitch = OUT_OF_BOUNDS;
 
 switch(motorSwitch){
-  //Brake (1)
+  //Brake (0)
   case(B):    Output = 0; //resets ki to reduce creep up
               myPID.SetTunings(0, 0, 0); //resets ki to reduce creep up
               digitalWrite(clockwise, 1);
@@ -171,7 +204,7 @@ switch(motorSwitch){
   //Large Step Clockwise (1)
   case(LCW):  analogWrite(clockwise, 255);
               analogWrite(anticlockwise, 0);
-              setColour(255, 0, 100); //torquoise
+              setColour(0, 255, 255); //red
               break;
   //Large Step Anticlockwise (2)
   case(LACW): analogWrite(clockwise, 0);
@@ -184,7 +217,7 @@ switch(motorSwitch){
               myPID.Compute();
               analogWrite(clockwise, speed);
               analogWrite(anticlockwise, 0);
-              setColour(255, 0, 100); //torquoise
+              setColour(0, 255, 255); //red
               break;
   //Full rotation Step Anticlockwise (4)
   case(FACW): myPID.SetTunings(Fkp, Fki, Fkd);
@@ -204,6 +237,7 @@ switch(motorSwitch){
                 digitalWrite(anticlockwise, 1);
               }
               break;
+  //Delay Before Full rotation Step Antilockwise (6)
   case(DELAY_FACW):
               if(millis() - FACWdelayStart >= delayInterval){ //check whether interval time has passed
                 motorSwitch = FACW; //set 360 rotation values if time passed
@@ -213,7 +247,13 @@ switch(motorSwitch){
                 digitalWrite(anticlockwise, 1);
               }
               break;
-  }
+  //Out of Bounds Error Mode (7)
+  case(OUT_OF_BOUNDS):
+              //If motor out of bounds enter error mode
+              setColour(50, 0, 255); //yellow for error
+              digitalWrite(clockwise, 0);
+              digitalWrite(anticlockwise, 0);
+    } 
 }
 
 //ISR For mark measurement on both edges USING IF
@@ -261,6 +301,7 @@ void SlidingWindow(){
 
 //LED 
 void setColour(int redValue, int greenValue, int blueValue) {
+  //Set to opposite values
   analogWrite(redLED, redValue);
   analogWrite(greenLED, greenValue);
   analogWrite(blueLED, blueValue);
@@ -278,9 +319,9 @@ void excelPlotting(){
   Serial.print(":");
   Serial.print(Feedback);
   Serial.print(":");
-  Serial.println(speed);
- // Serial.print(":");
-  //Serial.println(motorSwitch);
+  Serial.print(speed); 
+  Serial.print(":");
+  Serial.println(currentSenseRead);
   }
 }
 
