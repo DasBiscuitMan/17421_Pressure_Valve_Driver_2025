@@ -1,7 +1,8 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Utilizes PID Library by Brett Beuregard          
+    Notes:            Utilizes PID Library by Brett Beuregard, includes adaptive tuning for smaller steps
+                      this is needed as the PID value 'u' is too low in the small steps to influence speed enough     
 */
 //Librarys Included
 #include <PID_v1.h>
@@ -30,7 +31,8 @@
 
   //(MOTOR CONTROL)
     //error value
-    int error = 0; //int so that no decimals 
+    int error = 0; //int so that no decimals
+    int tolerance = 0; //to provide deadband around setpoint 
     //motor output variables
     int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
     int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
@@ -59,14 +61,15 @@
     //value for average of array
     double averageFeedbackValue = 0; 
 
-  //PID Variables
-  double kp = 1;
-  double ki = 0;
-  double kd = 0;
+  //Adaptive PID Variables
+  double Lkp = 1, Lki = 0.004, Lkd = 0; //large step values
+  int smallStepBand = 100; //Error < than this then small step values used
+  int smallStepIndicator = 0;
+  double Skp = 10, Ski = 0.5, Skd = 0; //Small step values
 
   double Setpoint, Feedback, Output;
 
-  PID myPID(&Feedback, &Output, &Setpoint, kp, ki, kd, DIRECT);
+  PID myPID(&Feedback, &Output, &Setpoint, Lkp, Lki, Lkd, DIRECT);
 
 void setup() {
   //(PWM MEASURE)
@@ -101,7 +104,7 @@ void loop() {
 
   pwmCalculate();
 
-  slidingWindow();
+  potSlidingWindow();
 
   motorControl();
 
@@ -118,14 +121,21 @@ void motorControl(){
   Setpoint = mappedPWM;
   //error value
   error = Setpoint - Feedback;
-  //set tunings and compute PID protocol
-  myPID.SetTunings(kp, ki, kd);
+  //set small or large tunings and compute PID protocol
+  if(abs(error) < smallStepBand){
+  myPID.SetTunings(Skp, Ski, Skd);
+  smallStepIndicator = 1;
+  }
+  else{
+  myPID.SetTunings(Lkp, Lki, Lkd);
+  smallStepIndicator = 99;
+  }
   myPID.Compute();
 
   //speed limit
   speed = abs(Output); //sets speed always a positive number
   if(speed > 255) speed = 255; //upper limit
-  if(speed < 110) speed = 110; //lower limit (110 no valve 160 with valve)
+  //if(speed < 110) speed = 110; //lower limit (110 no valve 160 with valve)
   
   //set direction and speed according to PID value
   if (error == 0){
@@ -133,13 +143,13 @@ void motorControl(){
     digitalWrite(anticlockwise, 1);
     setColour(255, 0, 255); //green
   } 
-  if (error > 0){
+  if (error > 0 + tolerance){
     myPID.SetControllerDirection(DIRECT);
     analogWrite(clockwise, speed);
     analogWrite(anticlockwise, 0);
     setColour(255, 0, 100); //torquoise
   } 
-  if (error < 0){ 
+  if (error < 0 - tolerance){ 
     myPID.SetControllerDirection(REVERSE);
     analogWrite(clockwise, 0);
     analogWrite(anticlockwise, speed);
@@ -173,7 +183,7 @@ void pwmCalculate(){
 }
 
 //AVERAGING
-void slidingWindow(){
+void potSlidingWindow(){
     //Delay function (alter to micros if needed)
   unsigned long currentMicros = micros();//stamp of time since arduino started up
 
@@ -214,7 +224,12 @@ void excelPlotting(){
   Serial.print(" ");
   Serial.print(Setpoint);
   Serial.print(" ");
-  Serial.println(Feedback);
+  Serial.print(Feedback);
+  Serial.print(" ");
+  Serial.print(speed);
+  Serial.print(" ");
+  Serial.println(smallStepIndicator);
+  
   }
   
 }
@@ -233,5 +248,5 @@ void serialPrinting(){
     Serial.print(" Speed ");
     Serial.println(speed);
 }
-
+//
 
