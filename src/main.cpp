@@ -64,7 +64,7 @@
     //Delay Variables
     unsigned long FCWdelayStart = 0; 
     unsigned long FACWdelayStart = 0;
-    const long delayInterval = 500; //time delay
+    const long delayInterval = 30; //time delay
     /* Outer Limit Values for 7 turns remove motor (leave pot on) 
     turn valve to closed attach motor shaft but not motor
     keep pot attached
@@ -72,6 +72,16 @@
     set these open and closed limits as values */
     double lowerLimit = 420; //
     double upperLimit = 3246; //
+    //Blipping System
+    int rotationBand = 200; //Error < than this then  blip value used
+    //delay for blipping 
+    const long onDelay = 20; 
+    const long offDelay = 500;
+    //non blocking delay for blip
+    unsigned long ACWpreviousMillis = 0; 
+    unsigned long CWpreviousMillis = 0;
+    unsigned long ACWcurrentMillis = 0;
+    unsigned long CWcurrentMillis = 0;
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //position variables
@@ -116,7 +126,7 @@
     const double currentLimit = 200; //overcurrent limit
   
   //Adaptive PID Variables
-    int rotationBand = 409; //Error < than this then  step value used
+
     double Fkp = 0.6, Fki = 0.05, Fkd = 0; //rotation step values Kp 1 Ki 0.125
     double Setpoint, Feedback, Output;
 
@@ -191,7 +201,7 @@ void loop()
   
   motorControl();
 
-  excelPlotting();
+  //excelPlotting();
 
 }
 
@@ -409,9 +419,9 @@ void calibrate()
     //(Home Loop)
     if(readstr == "h") 
     {
-    Serial.println("Entering Homing Sequence");
-    delay(2000);
-    homeFlag = true;
+      Serial.println("Entering Homing Sequence");
+      delay(2000);
+      homeFlag = true;
     }
     while(homeFlag == true)
     { 
@@ -452,8 +462,8 @@ void calibrate()
     //(Exit calibration routine)
     if(readstr == "x")
     {
-    Serial.println("Exiting Calibration Routine");
-    calibrateFlag = false;
+      Serial.println("Exiting Calibration Routine");
+      calibrateFlag = false;
     }
   }
 }
@@ -549,22 +559,56 @@ void motorControl()
               setColour(0, 255, 255); //red
               break;
   //Full rotation Step Clockwise (3)
-  case(FCW):  myPID.SetTunings(0, 0, 0);
-              myPID.SetTunings(Fkp, Fki, Fkd);
-              myPID.SetControllerDirection(DIRECT);
-              myPID.Compute();
-              analogWrite(clockwise, speed);
-              analogWrite(anticlockwise, 0);
+  case(FCW)://Blipping system
+            CWcurrentMillis = millis();
+
+            // If motor is currently off, check if it is time to turn it on
+            if (digitalRead(clockwise) == LOW) 
+            {
+              if (CWcurrentMillis - CWpreviousMillis >= offDelay) 
+              {
+                CWpreviousMillis = CWcurrentMillis; // Save previous time turned on
+                digitalWrite(clockwise, HIGH);      // Turn motor on
+                digitalWrite(anticlockwise, LOW);   // Ensure other direction is off
+              }
+            }
+            // If motor is currently on, check if it is time to turn it off
+            else 
+            {
+              if (CWcurrentMillis - CWpreviousMillis >= onDelay) 
+              {
+                CWpreviousMillis = CWcurrentMillis; // Save previous time turned off
+                digitalWrite(clockwise, LOW);       // Turn motor off
+                digitalWrite(anticlockwise, LOW);   // Ensure other direction is off
+              }
+            }
               setColour(0, 255, 255); //red
               break;
   //Full rotation Step Anticlockwise (4)
-  case(FACW): myPID.SetTunings(0, 0, 0);
-              myPID.SetTunings(Fkp, Fki, Fkd);
-              myPID.SetControllerDirection(REVERSE);
-              myPID.Compute();
-              analogWrite(clockwise, 0);
-              analogWrite(anticlockwise, speed);
-              setColour(0, 255, 255); //red
+  case(FACW): //Blipping System Delay
+            ACWcurrentMillis = millis();
+
+            // If motor is currently off, check if it is time to turn it on
+            if (digitalRead(anticlockwise) == LOW) 
+            {
+              if (ACWcurrentMillis - ACWpreviousMillis >= offDelay) 
+              {
+                ACWpreviousMillis = ACWcurrentMillis; // Save previous time turned on
+                digitalWrite(clockwise, LOW);      // Turn motor on
+                digitalWrite(anticlockwise, HIGH);   // Ensure other direction is off
+              }
+            }
+            // If motor is currently on, check if it is time to turn it off
+            else 
+            {
+              if (ACWcurrentMillis - ACWpreviousMillis >= onDelay) 
+              {
+                ACWpreviousMillis = ACWcurrentMillis; // Save previous time turned off
+                digitalWrite(clockwise, LOW);       // Turn motor off
+                digitalWrite(anticlockwise, LOW);   // Ensure other direction is off
+              }
+            }
+                setColour(0, 255, 255); //red
               break;  
   //Delay Before Full rotation Step Clockwise (5)
   case(DELAY_FCW):
@@ -572,8 +616,8 @@ void motorControl()
                 motorSwitch = FCW; //set 360 rotation values if time passed
               } else {
                 // Keep the motor in brake mode during the delay
-                digitalWrite(clockwise, 1);
-                digitalWrite(anticlockwise, 1);
+                digitalWrite(clockwise, 0);
+                digitalWrite(anticlockwise, 0);
               }
               break;
   //Delay Before Full rotation Step Antilockwise (6)
@@ -582,8 +626,8 @@ void motorControl()
                 motorSwitch = FACW; //set 360 rotation values if time passed
               } else {
                 // Keep the motor in brake mode during the delay
-                digitalWrite(clockwise, 1);
-                digitalWrite(anticlockwise, 1);
+                digitalWrite(clockwise, 0);
+                digitalWrite(anticlockwise, 0);
               }
               break;
     } 
@@ -814,7 +858,7 @@ void setColour(int redValue, int greenValue, int blueValue)
 
 void excelPlotting()
 {
- 
+  /*
   //Delay function (alter to micros if needed)
   static unsigned long serialStoredTimeStamp = 0;
   unsigned long currentTime = millis(); //stamp of time since arduino started up
@@ -822,7 +866,7 @@ void excelPlotting()
     serialStoredTimeStamp = currentTime; //stores current value to be compared with next measured value
   Serial.print(micros() / 1e6);
   Serial.print(":");
-  
+  */
   Serial.print(Setpoint);
   Serial.print(":");
   Serial.print(Feedback);
@@ -831,10 +875,14 @@ void excelPlotting()
   Serial.print(":");
   Serial.print(currentSenseRead);
   Serial.print(":");
+  Serial.print(i);
+  Serial.print(":");
   Serial.print(motorSwitch);
   Serial.print(":");
-  Serial.println(arrayComplete);
-  }
+  Serial.print(digitalRead(anticlockwise));
+  Serial.print(":");
+  Serial.println(digitalRead(clockwise));
+  //}
 }
 
 
