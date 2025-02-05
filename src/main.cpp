@@ -18,7 +18,6 @@
 
     //averaging Variables
     volatile int numberOfSamplePulses = 500;
-     volatile long preventStop = 0; //used to stop delay in motor movement due to pwm average calculation 
     volatile int pulseCount = 0;
     volatile long pulseWidthTotal = 0;
     volatile long averagePulseWidth = 0;
@@ -45,9 +44,14 @@
     #define redLED A3
     #define greenLED D4
     //tolerancing variables
-    int toleranceValue = 0; //UNUSED ATM
     int tolerance = 5; //value for tolerance so can be altered in main program
     signed int positionDifference; //value for simplified if statement
+    //speed variables
+    int speed = 10; //standard speed 
+    int slowSpeed = 110; //speed within slowing band
+    int slowBand = 100; //band to slow speed hopefully reducing overshoot
+    //OVERSHOOT CHECKING
+    #define setpointMet D7
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //Time delay
@@ -81,6 +85,9 @@ void setup() {
 
   //(SERIAL MONITORING)
     Serial.begin(9600); 
+
+  //OVERSHOOT CHECKING
+    pinMode(setpointMet, OUTPUT); //measure using logic analyser then measure 
 }
 void loop() {
 
@@ -105,7 +112,6 @@ void changingEdgeISR(){
                pulseWidth = pulseEndTime - pulseStartTime; 
                pulseCount++;
                pulseWidthTotal += pulseWidth;
-               preventStop++;
     }
 }
 
@@ -140,21 +146,44 @@ void motorControl(){
 
   switch (switchValue) {
     case(ON_TARGET):
+      //OVERSHOOT CHECKING
+      digitalWrite(setpointMet, HIGH); //measure using logic analyser then measure 
+
       analogWrite(clockwise, 255);
       analogWrite(anticlockwise, 255);
       setColour(200, 1, 127); //0 = high
       break;
 
     case(CLOCKWISE):
-      analogWrite(clockwise, 160);
+      //OVERSHOOT CHECKING
+      digitalWrite(setpointMet, LOW); //measure using logic analyser then measure 
+
+    if (positionDifference > 0 + slowBand){
+      analogWrite(clockwise, speed);
       analogWrite(anticlockwise, 0);
       setColour(0, 1, 255); //0 = high
+    }
+    if (positionDifference < 0 + slowBand){
+      analogWrite(clockwise, slowSpeed);
+      analogWrite(anticlockwise, 0);
+      setColour(0, 1, 255); //0 = high
+    }
       break;
     
     case(ANTICLOCKWISE):
+      //OVERSHOOT CHECKING
+      digitalWrite(setpointMet, LOW); //measure using logic analyser then measure 
+
+    if (positionDifference < 0 - slowBand){
       analogWrite(clockwise, 0);
-      analogWrite(anticlockwise, 160);
+      analogWrite(anticlockwise, speed);
       setColour(0, 1, 255); //0 = high
+    }
+    if (positionDifference > 0 - slowBand){
+      analogWrite(clockwise, 0);
+      analogWrite(anticlockwise, slowSpeed);
+      setColour(0, 1, 255); //0 = high
+    }
     break;
 
     default:
@@ -202,8 +231,6 @@ void serialPrinting(){
     Serial.print(averagePulseWidth);
     Serial.print(" mapped pulseWidth ");
     Serial.print(mappedPWM);
-    Serial.print(" prevent stop ");
-    Serial.print(preventStop);
     Serial.print(" motor position ");
     Serial.print(averageFeedbackValue);
     Serial.print(" switchValue ");
