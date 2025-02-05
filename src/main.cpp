@@ -71,8 +71,8 @@
   double mappedPWM = 0; //variable for mapping PWM value to motor position value
   double maxWidth = 4000; //max us pulse can be (dependant on frequency used)
   //values found by manually altering pot to exactly 7 turns
-  double lowValue = 0;
-  double highValue = 4096;
+  double lowValue = 430;
+  double highValue = 3288;
   
   //Adaptive PID Variables
   int rotationBand = 409; //Error < than this then  step value used
@@ -83,7 +83,7 @@
 
 void setup() {
   //(PWM MEASURE)
-    pinMode(pulsePin, INPUT_PULLDOWN); // Set pulsePin as input
+    pinMode(pulsePin, INPUT_PULLUP); // Set pulsePin as input
     attachInterrupt(digitalPinToInterrupt(pulsePin), changingEdgeISR, CHANGE); //Attaches interrupt to the PWM pin
   //(MOTOR CONTROL)
     //setting input pins
@@ -117,18 +117,9 @@ void loop() {
 
   SlidingWindow();
 
-  pwmCalculate();
-
   motorControl();
 
-  //excelPlotting();
-  Serial.print(Setpoint);
-  Serial.print(":");
-  Serial.print(Feedback);
-  Serial.print(":");
-  Serial.print(speed);
-  Serial.print(":");
-  Serial.println(motorSwitch);
+  excelPlotting();
 
     }
 
@@ -268,24 +259,10 @@ void SlidingWindow(){
   }
 }
 
-//Calculate PWM
-void pwmCalculate(){
-  //Delay function seems to give stabler values, also means the values arent constantly changing
-  static unsigned long storedTimeStamp = 0;
-  unsigned long currentTime = millis(); //stamp of time since arduino started up
-  if(currentTime >= storedTimeStamp + 500){ //alter number for delay time wanted
-    storedTimeStamp = currentTime; //stores current value to be compared with next measured value
-
-  //Mapping PWM values to match analogReadResolution
-  mappedPWM = map(averagePWMValue, 0, maxWidth, lowValue, highValue);
-
-  }
-}
-
 //LED 
 void setColour(int redValue, int greenValue, int blueValue) {
   analogWrite(redLED, redValue);
-  digitalWrite(greenLED, greenValue);
+  analogWrite(greenLED, greenValue);
   analogWrite(blueLED, blueValue);
 }
 
