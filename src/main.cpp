@@ -1,159 +1,110 @@
-/*  Title:            Motor Position Manipulation With Tolerance
+/*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Version 1: Includes position control, tolerance/deadband, uses analogRead input              
+    Notes:            Follows structure of flow chart              
 */
 
-//position variables
-#define positionInput A0 //analog input from pot to decide valve position
-int positionInputReading; //analog read position in
-#define positionFeedback A2 //motor rotory feedback from 10 turn POT
-int positionFeedbackReading; //to analog read the position feedback pin 
-
-//motor output variables
-int clockwise = D5; //powers clockwise pin on DRV8876 H-Bridge
-int anticlockwise = D6; //powers anticlockwise pin on DRV8876 H-Bridge
-
-//variables for position control switch statement (logic cant be used within switch)
-#define ON_TARGET 1
-#define CLOCKWISE 2
-#define ANTICLOCKWISE 3
-int switchValue;
-
-//tolerancing variables
-int tolerance = 20; //actual plus minus value for tolerancing
-int lastPositionFeedback; //changing value to be measured against tolerance
-
-
-void setup(){
-  analogReadResolution(12); //setting A-D to 12 bit
-  Serial.begin(9600); //setting up serial port with 9600 baud rate
-
-  //setting output pins
-  pinMode(clockwise, OUTPUT);
-  pinMode(anticlockwise, OUTPUT);
-
-
-}
-
-void loop(){
-
-  positionSwitch();
-  //calibrate();
-  serialMonitoring();
-
-}
-
-//calibration function to be completed in setup
-void calibrate(){
-  //warning message
-  Serial.print("CALIBRATION MODE");
-
-  positionFeedbackReading = analogRead(positionFeedback); //read the position feedback pin
-
-  //406 represents 1 turn out of 10 rotations (12bit)
-  //valve will turn 8 times in between the first and last turn of 10TPOT
-  if(406 == analogRead(positionFeedback))
-  {switchValue = ON_TARGET;} //motor is in correct position
-
-  if((406 > positionFeedbackReading) //motor needs to rotate clockwise to meet set position
-  & (406 > (lastPositionFeedback + tolerance))) //allows for tolerancing, wont move until tolerance breached
-  {switchValue = CLOCKWISE;} //motor needs to rotate clockwise to meet set position
-
-  if((406 < positionFeedbackReading) //motor needs to rotate anticlockwise to meet set position
-  & (406 < (lastPositionFeedback - tolerance)))//allows for tolerancing, wont move until tolerance breached
-  {switchValue = ANTICLOCKWISE;}
-
-  switch(switchValue){
-
-    //set both motor inputs high to use DRV8876 BRAKE function
-    case ON_TARGET:
-    digitalWrite(clockwise, HIGH);
-    digitalWrite(anticlockwise, HIGH);
-    break;
-
-    //set clockwise pin high and anticlockwise low
-    case CLOCKWISE:
-    digitalWrite(clockwise, HIGH);
-    digitalWrite(anticlockwise, LOW);
-    break;
-
-    //set anticlockwise pin high and clockwise low
-    case ANTICLOCKWISE:
-    digitalWrite(clockwise, LOW);
-    digitalWrite(anticlockwise, HIGH);
-    break;
-
-    //set both motor inputs low to use DRV8876 COAST function
-    default:
-    digitalWrite(clockwise, LOW);
-    digitalWrite(anticlockwise, LOW);
-    break;
-
-  }
-  //value for tolerancing comparison
-  lastPositionFeedback = positionFeedbackReading; //creates a value to be compared at beginning of function
-}
-
-//switch statement works alongside if statements to allow for logic function dependant on motor position
-void positionSwitch(){
-
-  positionFeedbackReading = analogRead(positionFeedback); //read the position feedback pin
+//Variable Definitions
 
   
-  if(analogRead(positionInput) == positionFeedbackReading) //motor is in correct position no tolerancing needed
-  {switchValue = ON_TARGET;} 
-  if((analogRead(positionInput) > positionFeedbackReading) //motor needs to rotate clockwise to meet set position
-  & (analogRead(positionInput) > (lastPositionFeedback + tolerance))) //allows for tolerancing, wont move until tolerance breached
-  {switchValue = CLOCKWISE;}
-  if((analogRead(positionInput) < positionFeedbackReading) //motor needs to rotate anticlockwise to meet set position
-  & (analogRead(positionInput) < (lastPositionFeedback - tolerance)))//allows for tolerancing, wont move until tolerance breached
-  {switchValue = ANTICLOCKWISE;}
+  //(PWM MEASURE) 
+    //mark to space ratio measuring position variables
+    #define pulsePin D5  // Define the input pin for the pulse signal
+    volatile long pulseStartTime = 0; // Variable to store the start time of the pulse (voltatile used to ensure updates in isr)
+    volatile long pulseEndTime = 0;   // Variable to store the end time of the pulse
+    volatile long pulseWidth = 0;     // Variable to store the pulse width
+    //flags to indicate 1 cycle
+    volatile long flag = 0; 
+    //mapping PWM Variables 
+    int mappedPWM = 0; //variable for mapping PWM value to motor position value
 
-  switch(switchValue){
+  //(MOTOR CONTROL)
+    //position variables
+    #define positionFeedback A0 //motor rotory feedback from 10 turn POT
+    int positionFeedbackReading; //to analog read the position feedback pin 
 
-    //set both motor inputs high to use DRV8876 BRAKE function
-    case ON_TARGET:
-    digitalWrite(clockwise, HIGH);
-    digitalWrite(anticlockwise, HIGH);
-    break;
+    //motor output variables
+    int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
+    int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
 
-    //set clockwise pin high and anticlockwise low
-    case CLOCKWISE:
-    digitalWrite(clockwise, HIGH);
-    digitalWrite(anticlockwise, LOW);
-    break;
-
-    //set anticlockwise pin high and clockwise low
-    case ANTICLOCKWISE:
-    digitalWrite(clockwise, LOW);
-    digitalWrite(anticlockwise, HIGH);
-    break;
-
-    //set both motor inputs low to use DRV8876 COAST function
-    default:
-    digitalWrite(clockwise, LOW);
-    digitalWrite(anticlockwise, LOW);
-    break;
   
+
+    //tolerancing variables
+    int tolerance = 50; //actual plus minus value for tolerancing 
+    int flagTolerance = 0; //flag to ensure value is met before tolerance is used
+
+
+void setup() {
+  //(PWM MEASURE)
+    pinMode(pulsePin, INPUT_PULLDOWN); // Set pulsePin as input
+    attachInterrupt(digitalPinToInterrupt(pulsePin), changingEdgeISR, CHANGE); //Attaches interrupt to the PWM pin
+
+  //(MOTOR CONTROL)
+    //setting input pins
+    pinMode(positionFeedback, INPUT);
+    //setting output pins
+    pinMode(clockwise, OUTPUT);
+    pinMode(anticlockwise, OUTPUT);
+    //setting up analogRead to 12 bit resolution
+    analogReadResolution(10);
+
+  //(SERIAL MONITORING)
+    Serial.begin(9600);
+
+}
+
+void loop() {
+//(PWM MEASURE)
+    if(flag == 2){
+        pulseWidth = pulseEndTime - pulseStartTime; //subtracts stamp on rising edge from stamp on falling edge
+        flag = 0;
+    }
+
+//(MOTOR CONTROL)
+    //logic system to control motor rotation and brake 
+    //brake if motor in correct position
+    if(pulseWidth == analogRead(positionFeedback)){
+      digitalWrite(clockwise, 1);
+      digitalWrite(anticlockwise, 1);
+      flagTolerance = 1;
+    }
+    //rotate clockwise if motor is lower than correct position
+    if((pulseWidth > (analogRead(positionFeedback) + tolerance)) && (flagTolerance = 1)){
+      digitalWrite(clockwise, 1);
+      digitalWrite(anticlockwise, 0);
+      flagTolerance = 0;
+    }
+    //rotate clockwise if motor is lower than correct position
+    if((pulseWidth < (analogRead(positionFeedback) - tolerance)) && (flagTolerance = 1)){
+      digitalWrite(clockwise, 0);
+      digitalWrite(anticlockwise, 1);
+      flagTolerance = 0;
+    }
+
+    Serial.print("pulseWidth ");
+    Serial.print(pulseWidth);
+    Serial.print(" motor position ");
+    Serial.print(analogRead(positionFeedback));
+    Serial.print(" clockwise ");
+    Serial.print(digitalRead(clockwise));
+    Serial.print(" anticlockwise ");
+    Serial.println(digitalRead(anticlockwise));
+
+
+
+    }
+
+
+
+
+//ISR For mark measurement on both edges USING IF
+void changingEdgeISR(){  
+  if(digitalRead(pulsePin) == 1){
+  pulseStartTime = micros(); //measures stamp in microseconds
+  flag = 1; //checks whether pulse gone high
   }
-  //value for tolerancing comparison
-  lastPositionFeedback = positionFeedbackReading; //creates a value to be compared at beginning of function
-
- //}
+  if(digitalRead(pulsePin) == 0){
+  pulseEndTime = micros(); //measures stamp in microseconds
+  flag = 2; //checks whether pulse gone low
+  }
 }
-
-//monitoring input and output values
-void serialMonitoring(){
-
-  Serial.print("\t Position Input = ");
-  Serial.print(analogRead(positionInput));
-  Serial.print("\t Actual Position = ");
-  Serial.print(analogRead(positionFeedback));
-  Serial.print("\t last position feedback = ");
-  Serial.println(lastPositionFeedback);
-
-}
-
-
-
