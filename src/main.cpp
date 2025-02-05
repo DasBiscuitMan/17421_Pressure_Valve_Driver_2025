@@ -1,8 +1,8 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Utilizes PID Library by Brett Beuregard, includes adaptive tuning for smaller steps
-                      this is needed as the PID value 'u' is too low in the small steps to influence speed enough     
+    Notes:            Utilizes PID Library by Brett Beuregard, 
+                      Uses sliding window for PWM averaging to reduce lag    
 */
 //Librarys Included
 #include <PID_v1.h>
@@ -18,16 +18,6 @@
 
     volatile boolean debug_code = false; //If True PWM will print
     volatile boolean flag = 0; //used in switch to ensure calculation only occurs on low edge
-
-    //averaging Variables
-    volatile int numberOfSamplePulses = 500;
-    volatile int pulseCount = 0;
-    volatile double pulseWidthTotal = 0.0;
-    volatile double averagePulseWidth = 0.0;
-   
-    //mapping PWM Variables 
-    double mappedPWM = 0; //variable for mapping PWM value to motor position value
-    double maxWidth = 4000; //max us pulse can be (dependant on frequency used)
 
   //(MOTOR CONTROL)
     //error value
@@ -55,16 +45,23 @@
     const unsigned int numReadings = 100; //ammount of sampling values in the array
     //array with size
     double potValues[numReadings]; 
+    double pwmValues[numReadings];
     unsigned int i = 0; //pointer for if function
     //value for summing the array
     double potSum = 0; 
+    double pwmSum = 0;
     //value for average of array
     double averageFeedbackValue = 0; 
+    double averagePWMValue = 0;
+
+  //mapping PWM Variables 
+  double mappedPWM = 0; //variable for mapping PWM value to motor position value
+  double maxWidth = 4000; //max us pulse can be (dependant on frequency used)
 
   //Adaptive PID Variables
   double Lkp = 1, Lki = 0.004, Lkd = 0; //large step values
   int smallStepBand = 100; //Error < than this then small step values used
-  int smallStepIndicator = 0;
+  char smallStepIndicator = 'B'; //Eliminates band entry 
   double Skp = 10, Ski = 0.5, Skd = 0; //Small step values
 
   double Setpoint, Feedback, Output;
@@ -102,9 +99,9 @@ void setup() {
 }
 void loop() {
 
-  pwmCalculate();
+  SlidingWindow();
 
-  potSlidingWindow();
+  pwmCalculate();
 
   motorControl();
 
@@ -122,13 +119,15 @@ void motorControl(){
   //error value
   error = Setpoint - Feedback;
   //set small or large tunings and compute PID protocol
-  if(abs(error) < smallStepBand){
+  if((abs(error) < smallStepBand) && (smallStepIndicator != 'L')){ //& means wont go into this band when using large step
   myPID.SetTunings(Skp, Ski, Skd);
-  smallStepIndicator = 1;
+  //Set flag
+  smallStepIndicator = 'S'; 
   }
-  else{
+  else if (abs(error) > smallStepBand && smallStepIndicator != 'S'){}
   myPID.SetTunings(Lkp, Lki, Lkd);
-  smallStepIndicator = 99;
+  //Set flag
+  smallStepIndicator = 'L';
   }
   myPID.Compute();
 
@@ -139,6 +138,7 @@ void motorControl(){
   
   //set direction and speed according to PID value
   if (error == 0){
+    smallStepIndicator = 'B'; //Reset Flag
     digitalWrite(clockwise, 1);
     digitalWrite(anticlockwise, 1);
     setColour(255, 0, 255); //green
@@ -166,24 +166,12 @@ void changingEdgeISR(){
                
     case (0) : pulseEndTime = micros();
                pulseWidth = pulseEndTime - pulseStartTime; 
-               pulseCount++;
-               pulseWidthTotal += pulseWidth;
     }
 }
 
-void pwmCalculate(){
-  //function needed to remove delay in calculations
-  if(pulseCount >= numberOfSamplePulses) 
-    { pulseCount = 0;
-    averagePulseWidth = pulseWidthTotal/numberOfSamplePulses; 
-    if (debug_code) Serial.println(averagePulseWidth);
-      pulseWidthTotal = 0;   
-    }
-  mappedPWM = map(averagePulseWidth, 0, maxWidth, 0, 4096);
-}
 
-//AVERAGING
-void potSlidingWindow(){
+//AVERAGING both the Pot values and the PWM Values
+void SlidingWindow(){
     //Delay function (alter to micros if needed)
   unsigned long currentMicros = micros();//stamp of time since arduino started up
 
@@ -192,20 +180,38 @@ void potSlidingWindow(){
     
     // Remove the oldest value from the sum
     potSum -= potValues[i];
-    
+    pwmSum -= pwmValues[i];
     
     // Read the new value and add it to the sum
     potValues[i] = analogRead(positionFeedback);
     potSum += potValues[i];
+    pwmValues[i] = pulseWidth;
+    pwmSum += pwmValues[i];
     
     // Move to the next position in the array
     i = (i + 1) % numReadings;
 
     // Calculate the average
     averageFeedbackValue = potSum / numReadings;
+    averagePWMValue = pwmSum / numReadings;
 
   }
 }
+
+//Calculate PWM
+void pwmCalculate(){
+  //Delay function seems to give stabler values, also means the values arent constantly changing
+  static unsigned long storedTimeStamp = 0;
+  unsigned long currentTime = millis(); //stamp of time since arduino started up
+  if(currentTime >= storedTimeStamp + 500){ //alter number for delay time wanted
+    storedTimeStamp = currentTime; //stores current value to be compared with next measured value
+
+  //Mapping PWM values to match analogReadResolution
+  mappedPWM = map(averagePWMValue, 0, 4000, 0, 4096);
+
+  }
+}
+
 //LED 
 void setColour(int redValue, int greenValue, int blueValue) {
   analogWrite(redLED, redValue);
@@ -235,8 +241,6 @@ void excelPlotting(){
 }
 void serialPrinting(){
 
-    Serial.print(" average pulseWidth ");
-    Serial.print(averagePulseWidth);
     Serial.print(" Setpoint ");
     Serial.print(Setpoint);
     Serial.print(" Feedback ");
@@ -248,5 +252,5 @@ void serialPrinting(){
     Serial.print(" Speed ");
     Serial.println(speed);
 }
-//
+
 
