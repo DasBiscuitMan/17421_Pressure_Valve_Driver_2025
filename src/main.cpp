@@ -10,7 +10,6 @@
 // Function Prototypes
 void motorControl();
 void computeError();
-void currentSense();
 void changingEdgeISR();
 void SlidingWindow();
 void setColour(int redValue, int greenValue, int blueValue);
@@ -31,7 +30,7 @@ void excelPlotting();
   //(MOTOR CONTROL)
     //error value
     int error = 0; //int so that no decimals
-    int tolerance = 5; //to provide deadband around setpoint 
+    int tolerance = 2; //to provide deadband around setpoint 
     //motor output variables
     int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
     int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
@@ -56,15 +55,22 @@ void excelPlotting();
     //Delay Variables
     unsigned long FCWdelayStart = 0; 
     unsigned long FACWdelayStart = 0;
-    const long delayInterval = 1000; //time delay
-    //Outer Limit Values for 7 turns (may need calibrating)
-    double lowerLimit = 408;
-    double upperLimit = 3264;
+    const long delayInterval = 500; //time delay
+    /* Outer Limit Values for 7 turns remove motor (leave pot on) 
+    turn valve to closed attach motor shaft but not motor
+    keep pot attached
+    rotate valve until open 
+    set these open and closed limits as values */
+    double lowerLimit = 420; //
+    double upperLimit = 3246; //
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //position variables
     #define positionFeedback A0 //motor rotory feedback from 10 turn POT
     double positionFeedbackReading; //to analog read the position feedback pin 
+    //Motor Current Variables
+    #define currentSense A3
+    double currentSenseRead = 0;
     //Time delay
     double storedTimeStamp = 0;
     //values for sliding window
@@ -72,13 +78,16 @@ void excelPlotting();
     //array with size
     double potValues[numReadings]; 
     double pwmValues[numReadings];
+    double currentValues[numReadings];
     unsigned int i = 0; //pointer for if function
     //value for summing the array
     double potSum = 0; 
     double pwmSum = 0;
+    double currentSum = 0;
     //value for average of array
     double averageFeedbackValue = 0; 
     double averagePWMValue = 0;
+    double averageCurrentValue = 0;
 
   //mapping PWM Variables 
   double mappedPWM = 0; //variable for mapping PWM value to motor position value
@@ -89,14 +98,10 @@ void excelPlotting();
   
   //Adaptive PID Variables
   int rotationBand = 409; //Error < than this then  step value used
-  double Fkp = 1, Fki = 0.125, Fkd = 0; //rotation step values
+  double Fkp = 1, Fki = 0.05, Fkd = 0; //rotation step values Kp 1 Ki 0.125
   double Setpoint, Feedback, Output;
 
   PID myPID(&Feedback, &Output, &Setpoint, Fkp, Fki, Fkd, DIRECT);
-
-  //CURRENT SENSE
-  #define currentSense A3
-  double currentSenseRead = 0;
 
 
 void setup() {
@@ -144,8 +149,6 @@ void loop() {
 
   excelPlotting();
 
-  currentSenseRead = map(analogRead(currentSense),0, 4096, 0, 3300);
-
     }
 
 //(COMPUTE AND ERROR MODES)
@@ -190,8 +193,10 @@ void motorControl(){
     FACWdelayStart = millis(); //take initial time stamp
     }
   }
+  //ERROR MODES
     //Out of Bounds Error Mode
-  if(Feedback > upperLimit || Feedback < lowerLimit) motorSwitch = OUT_OF_BOUNDS;
+  if(Feedback > upperLimit + tolerance || Feedback < lowerLimit - tolerance) motorSwitch = OUT_OF_BOUNDS;
+    //
 
 switch(motorSwitch){
   //Brake (0)
@@ -280,22 +285,27 @@ void SlidingWindow(){
     // Remove the oldest value from the sum
     potSum -= potValues[i];
     pwmSum -= pwmValues[i];
+    currentSum -= currentValues[i];
     
     // Read the new value and add it to the sum
     potValues[i] = analogRead(positionFeedback);
     potSum += potValues[i];
     pwmValues[i] = pulseWidth;
     pwmSum += pwmValues[i];
-    
+    currentValues[i] = analogRead(currentSense);
+    currentSum += currentValues[i];
+
     // Move to the next position in the array
     i = (i + 1) % numReadings;
 
     // Calculate the average
     averageFeedbackValue = potSum / numReadings;
     averagePWMValue = pwmSum / numReadings;
+    averageCurrentValue = currentSum / numReadings;
     //Mapping PWM values to match analogReadResolution
     mappedPWM = map(averagePWMValue, 0, maxWidth, lowValue, highValue);
- 
+    //Mapping current values to match gain and voltage of the system
+    currentSenseRead = (map(analogRead(currentSense),0, 4096, 0, 3300))/11; //Divided by 11 as gain = 11 on PCB
   }
 }
 
@@ -311,7 +321,7 @@ void excelPlotting(){
   //Delay function (alter to micros if needed)
   static unsigned long storedTimeStamp = 0;
   unsigned long currentTime = millis(); //stamp of time since arduino started up
-  if(currentTime >= storedTimeStamp + 200){ //alter number for delay time wanted
+  if(currentTime >= storedTimeStamp + 10){ //alter number for delay time wanted
     storedTimeStamp = currentTime; //stores current value to be compared with next measured value
   Serial.print(micros() / 1e6);
   Serial.print(":");
