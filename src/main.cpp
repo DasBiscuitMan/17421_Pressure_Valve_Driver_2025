@@ -1,11 +1,13 @@
 /*  Title:            PPMS #17421 Motor Driver using PWM INPUT
     Author:           Joe Cook
     Equipment:        In BOM Folder
-    Notes:            Implementing current sense and calibration
+    Notes:            Lowering PWM out Frequency to see if improves PID accuracy
 */
 //Librarys Included
   #include <Arduino.h>
   #include <PID_v1.h>
+  #include "pico/stdlib.h"   // Include necessary libraries for direct control
+  #include "hardware/pwm.h"  // Include library for PWM control
 
 // Function Prototypes
   void pwmTimeout(); //Used to add a timeout to PWM so doesnt latch high
@@ -18,6 +20,7 @@
   void currentSlidingWindow(); //Averages motor current
   void motorControl(); //Controls motor using PID depending on paramters
   void computeError(); //Computes error for use in motorControl
+  void dutyCycleSet(); //Sets PID values calculated to duty cycle values
   void setColour(int redValue, int greenValue, int blueValue); //Controls RGB LED
   void excelPlotting(); //Used for data analysis (system response, PID tuning etc.)
 
@@ -41,8 +44,8 @@
     int error = 0; //int so that no decimals
     int tolerance = 5; //to provide deadband around setpoint 
     //motor output variables
-    int clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
-    int anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
+    const uint clockwise = D10; //powers clockwise pin on DRV8876 H-Bridge
+    const uint anticlockwise = D9; //powers anticlockwise pin on DRV8876 H-Bridge
     //Speed Variables
     double speed = 0; 
     //LED Indicators
@@ -62,9 +65,11 @@
     #define DELAY_FACW 6
     #define OUT_OF_BOUNDS 7
     //Delay Variables
+    unsigned long FCWdelayMillis = 0; 
     unsigned long FCWdelayStart = 0; 
+    unsigned long FACWdelayMillis = 0;
     unsigned long FACWdelayStart = 0;
-    const long delayInterval = 30; //time delay
+    const long delayInterval = 500; //time delay
     /* Outer Limit Values for 7 turns remove motor (leave pot on) 
     turn valve to closed attach motor shaft but not motor
     keep pot attached
@@ -72,16 +77,6 @@
     set these open and closed limits as values */
     double lowerLimit = 420; //
     double upperLimit = 3246; //
-    //Blipping System
-    int rotationBand = 200; //Error < than this then  blip value used
-    //delay for blipping 
-    const long onDelay = 20; 
-    const long offDelay = 500;
-    //non blocking delay for blip
-    unsigned long ACWpreviousMillis = 0; 
-    unsigned long CWpreviousMillis = 0;
-    unsigned long ACWcurrentMillis = 0;
-    unsigned long CWcurrentMillis = 0;
 
   //SLIDING WINDOW for Feedback Potentiometer and PWM Measurement
     //position variables
@@ -126,8 +121,8 @@
     const double currentLimit = 200; //overcurrent limit
   
   //Adaptive PID Variables
-
-    double Fkp = 0.6, Fki = 0.05, Fkd = 0; //rotation step values Kp 1 Ki 0.125
+    int rotationBand = 200; //Error < than this then  step value used
+    double Fkp = 0.4, Fki = 0.056, Fkd = 0; //rotation step values Kp 1 Ki 0.125
     double Setpoint, Feedback, Output;
 
     PID myPID(&Feedback, &Output, &Setpoint, Fkp, Fki, Fkd, DIRECT);
@@ -144,6 +139,17 @@
     bool homeFlag = false;
     int homeSetpoint;
     String readstr = ""; //String declaration
+  //PWMOUT Frequency Control Variables
+    // Global variables for PWM control
+    uint32_t pwm_freq = 10;        // Default frequency in Hz
+    uint32_t cwDuty_cycle = 50;     // Default duty cycle in percentage for channel 1
+    uint32_t acwDuty_cycle = 50;     // Default duty cycle in percentage for channel 2
+    uint cwSlice_num;               // PWM slice number for PWM_PIN1
+    uint acwSlice_num;               // PWM slice number for PWM_PIN2
+    uint32_t clock_divider = 256;  // Clock divider (adjustable)
+    uint32_t wrap_value;           // PWM wrap value
+    uint32_t cwLevel;               // Duty cycle level for channel 1
+    uint32_t acwLevel;               // Duty cycle level for channel 2
 
 void setup() 
 {
@@ -177,12 +183,35 @@ void setup()
     //CURRENT SENSE
     pinMode(currentSense, INPUT);
 
-  //REMOVE CALIBRATE ENTER
-    //Stop movement on startup due to tolerancing
-    motorSwitch = B;
-    SlidingWindow();
-    SlidingWindow();
-    SlidingWindow();
+    //PWM Frequency Control
+    // Initialize the selected pins for PWM output
+    gpio_set_function(clockwise, GPIO_FUNC_PWM);
+    gpio_set_function(anticlockwise, GPIO_FUNC_PWM);
+  
+    // Find out which PWM slice is connected to each GPIO
+    cwSlice_num = pwm_gpio_to_slice_num(clockwise);
+    acwSlice_num = pwm_gpio_to_slice_num(anticlockwise);
+
+    // Set initial PWM parameters for both slices
+    pwm_set_clkdiv(cwSlice_num, clock_divider); // Set clock divider for slice 1
+    pwm_set_clkdiv(acwSlice_num, clock_divider); // Set clock divider for slice 2
+
+    // Calculate wrap value based on the frequency and clock divider
+    wrap_value = (125000000 / (pwm_freq * clock_divider)) - 1;
+    pwm_set_wrap(cwSlice_num, wrap_value); // Set the new PWM frequency for slice 1
+    pwm_set_wrap(acwSlice_num, wrap_value); // Set the new PWM frequency for slice 2
+
+    // Calculate level value for the duty cycle for PWM_PIN1
+    cwLevel = (wrap_value * cwDuty_cycle) / 100;
+    pwm_set_gpio_level(clockwise, cwLevel);  // Set the new PWM duty cycle for PWM_PIN1
+
+    // Calculate level value for the duty cycle for PWM_PIN2
+    acwLevel = (wrap_value * acwDuty_cycle) / 100;
+    pwm_set_gpio_level(anticlockwise, acwLevel);  // Set the new PWM duty cycle for PWM_PIN2
+
+    // Enable PWM output for both slices
+    pwm_set_enabled(cwSlice_num, true);
+    pwm_set_enabled(acwSlice_num, true);
 
 }
 
@@ -201,7 +230,7 @@ void loop()
   
   motorControl();
 
-  //excelPlotting();
+  excelPlotting();
 
 }
 
@@ -242,8 +271,8 @@ void calibrate()
   while(calibrateFlag == true) //beginning of calibrate loop
   {
     //Place Motor in break
-    digitalWrite(clockwise, 1);
-    digitalWrite(anticlockwise, 1);
+    pwm_set_gpio_level(clockwise, 48826);
+    pwm_set_gpio_level(anticlockwise, 48826);
   
     //Read Serial Port within calibrate loop
     readString();
@@ -332,33 +361,33 @@ void calibrate()
       if (readstr == "s") // close/shut
       {
         // Start the motor rotation for a brief period
-        digitalWrite(clockwise, 0);
-        digitalWrite(anticlockwise, 1);
+        pwm_set_gpio_level(clockwise, 0);
+        pwm_set_gpio_level(anticlockwise, 48826);
         setColour(0, 255, 255); // red
         delay(25); // small delay for a short movement
         readstr = "p"; //stops string being s
-        digitalWrite(anticlockwise, 0);
+        pwm_set_gpio_level(anticlockwise, 0);
       }
 
       if (readstr == "o") // open
       {
         // Start the motor rotation for a brief period
-        digitalWrite(clockwise, 1);
-        digitalWrite(anticlockwise, 0);
+        pwm_set_gpio_level(clockwise, 48826);
+        pwm_set_gpio_level(anticlockwise, 0);
         setColour(0, 255, 255); // red
         delay(20);
         readstr = "p"; //stops string being o
-        digitalWrite(clockwise, 0);
+        pwm_set_gpio_level(clockwise, 0);
       }
       if (readstr == "b") //brake
       {
-        digitalWrite(clockwise, 1);
-        digitalWrite(anticlockwise, 1);
+        pwm_set_gpio_level(clockwise, 48826);
+        pwm_set_gpio_level(anticlockwise, 48826);
         setColour(0, 255, 255); // red
         delay(500);
         readstr = "p"; //stops string being o
-        digitalWrite(clockwise, 0);
-        digitalWrite(anticlockwise, 0);
+        pwm_set_gpio_level(clockwise, 0);
+        pwm_set_gpio_level(anticlockwise, 0);
       }
     }
 
@@ -462,8 +491,8 @@ void calibrate()
     //(Exit calibration routine)
     if(readstr == "x")
     {
-      Serial.println("Exiting Calibration Routine");
-      calibrateFlag = false;
+    Serial.println("Exiting Calibration Routine");
+    calibrateFlag = false;
     }
   }
 }
@@ -493,6 +522,7 @@ void printInstructions()
     Serial.println(" ");  
     Serial.println("To exit Calibrate Press, 'x'");
 }
+
 //(COMPUTE AND ERROR MODES)
 void computeError()
 {
@@ -509,8 +539,19 @@ void computeError()
   //speed limit
   speed = abs(Output); //sets speed always a positive number
   if(speed > 255) speed = 255; //upper limit
+  dutyCycleSet();
 }
 
+void dutyCycleSet()
+{
+  // Map Speed values to duty cycle (0-100%)
+  cwDuty_cycle = map(speed, 0, 255, 0, 100);
+  acwDuty_cycle = map(speed, 0, 255, 0, 100);
+  // Calculate level value for the duty cycle for PWM_PIN1
+  cwLevel = (wrap_value * cwDuty_cycle) / 100;
+  // Calculate level value for the duty cycle for PWM_PIN2
+  acwLevel = (wrap_value * acwDuty_cycle) / 100;
+}
 //(MOTOR CONTROL)
 void motorControl()
 {
@@ -526,15 +567,17 @@ void motorControl()
     //Clockwise Control
   if ((error < 0 + rotationBand) && (error > 0 + tolerance)){
     if(motorSwitch != FCW && motorSwitch != DELAY_FCW){ //initially send into the delay function
-      motorSwitch = DELAY_FCW;
       FCWdelayStart = millis(); //take initial time stamp
+      motorSwitch = DELAY_FCW;
+      
     }
   }
     //Anticlockwise Control
   if ((error > 0 - rotationBand) && (error < 0 - tolerance)){
     if(motorSwitch != FACW && motorSwitch != DELAY_FACW){ //initially send into the delay function
-    motorSwitch = DELAY_FACW;
     FACWdelayStart = millis(); //take initial time stamp
+    motorSwitch = DELAY_FACW;
+    
     }
   }
 
@@ -542,82 +585,50 @@ void motorControl()
   //Brake (0)
   case(B):    Output = 0; //resets ki to reduce creep up
               myPID.SetTunings(0, 0, 0); //resets ki to reduce creep up
-              digitalWrite(clockwise, 1);
-              digitalWrite(anticlockwise, 1);
+              pwm_set_gpio_level(clockwise, 48826);
+              pwm_set_gpio_level(anticlockwise, 48826);
               setColour(255, 0, 255); //green
               break;
   //Large Step Clockwise (1)
   case(LCW):  Output = 0; //reset output to allow PID 
-              analogWrite(clockwise, 255);
-              analogWrite(anticlockwise, 0);
+              pwm_set_gpio_level(clockwise, 48826);
+              pwm_set_gpio_level(anticlockwise, 0);
               setColour(0, 255, 255); //red
               break;
   //Large Step Anticlockwise (2)
   case(LACW): Output = 0; //reset output to allow PID 
-              analogWrite(clockwise, 0);
-              analogWrite(anticlockwise, 255);
+              pwm_set_gpio_level(clockwise, 0);
+              pwm_set_gpio_level(anticlockwise, 48826);
               setColour(0, 255, 255); //red
               break;
   //Full rotation Step Clockwise (3)
-  case(FCW)://Blipping system
-            CWcurrentMillis = millis();
-
-            // If motor is currently off, check if it is time to turn it on
-            if (digitalRead(clockwise) == LOW) 
-            {
-              if (CWcurrentMillis - CWpreviousMillis >= offDelay) 
-              {
-                CWpreviousMillis = CWcurrentMillis; // Save previous time turned on
-                digitalWrite(clockwise, HIGH);      // Turn motor on
-                digitalWrite(anticlockwise, LOW);   // Ensure other direction is off
-              }
-            }
-            // If motor is currently on, check if it is time to turn it off
-            else 
-            {
-              if (CWcurrentMillis - CWpreviousMillis >= onDelay) 
-              {
-                CWpreviousMillis = CWcurrentMillis; // Save previous time turned off
-                digitalWrite(clockwise, LOW);       // Turn motor off
-                digitalWrite(anticlockwise, LOW);   // Ensure other direction is off
-              }
-            }
+  case(FCW):  myPID.SetTunings(0, 0, 0);
+              myPID.SetTunings(Fkp, Fki, Fkd);
+              myPID.SetControllerDirection(DIRECT);
+              myPID.Compute();
+              dutyCycleSet();
+              pwm_set_gpio_level(clockwise, cwLevel);  // Set the new PWM duty cycle for PWM_PIN1
+              pwm_set_gpio_level(anticlockwise, 0);
               setColour(0, 255, 255); //red
               break;
   //Full rotation Step Anticlockwise (4)
-  case(FACW): //Blipping System Delay
-            ACWcurrentMillis = millis();
-
-            // If motor is currently off, check if it is time to turn it on
-            if (digitalRead(anticlockwise) == LOW) 
-            {
-              if (ACWcurrentMillis - ACWpreviousMillis >= offDelay) 
-              {
-                ACWpreviousMillis = ACWcurrentMillis; // Save previous time turned on
-                digitalWrite(clockwise, LOW);      // Turn motor on
-                digitalWrite(anticlockwise, HIGH);   // Ensure other direction is off
-              }
-            }
-            // If motor is currently on, check if it is time to turn it off
-            else 
-            {
-              if (ACWcurrentMillis - ACWpreviousMillis >= onDelay) 
-              {
-                ACWpreviousMillis = ACWcurrentMillis; // Save previous time turned off
-                digitalWrite(clockwise, LOW);       // Turn motor off
-                digitalWrite(anticlockwise, LOW);   // Ensure other direction is off
-              }
-            }
-                setColour(0, 255, 255); //red
+  case(FACW): myPID.SetTunings(0, 0, 0);
+              myPID.SetTunings(Fkp, Fki, Fkd);
+              myPID.SetControllerDirection(REVERSE);
+              myPID.Compute();
+              dutyCycleSet();
+              pwm_set_gpio_level(clockwise, 0);
+              pwm_set_gpio_level(anticlockwise, acwLevel);  // Set the new PWM duty cycle for PWM_PIN2
+              setColour(0, 255, 255); //red
               break;  
   //Delay Before Full rotation Step Clockwise (5)
-  case(DELAY_FCW):
+  case(DELAY_FCW):              
               if(millis() - FCWdelayStart >= delayInterval){ //check whether interval time has passed
                 motorSwitch = FCW; //set 360 rotation values if time passed
               } else {
                 // Keep the motor in brake mode during the delay
-                digitalWrite(clockwise, 0);
-                digitalWrite(anticlockwise, 0);
+                pwm_set_gpio_level(clockwise, 48826);
+                pwm_set_gpio_level(anticlockwise, 48826);
               }
               break;
   //Delay Before Full rotation Step Antilockwise (6)
@@ -626,8 +637,8 @@ void motorControl()
                 motorSwitch = FACW; //set 360 rotation values if time passed
               } else {
                 // Keep the motor in brake mode during the delay
-                digitalWrite(clockwise, 0);
-                digitalWrite(anticlockwise, 0);
+                pwm_set_gpio_level(clockwise, 48826);
+                pwm_set_gpio_level(anticlockwise, 48826);
               }
               break;
     } 
@@ -660,50 +671,55 @@ void calibrateMotorControl()
     FACWdelayStart = millis(); //take initial time stamp
     }
   }
+
   switch(motorSwitch){
   //Brake (0)
   case(B):    Output = 0; //resets ki to reduce creep up
               myPID.SetTunings(0, 0, 0); //resets ki to reduce creep up
-              digitalWrite(clockwise, 1);
-              digitalWrite(anticlockwise, 1);
+              pwm_set_gpio_level(clockwise, 48826);
+              pwm_set_gpio_level(anticlockwise, 48826);
               setColour(255, 0, 255); //green
               break;
   //Large Step Clockwise (1)
-  case(LCW):  Output = 0; //resets ki to reduce creep up
-              analogWrite(clockwise, 255);
-              analogWrite(anticlockwise, 0);
+  case(LCW):  Output = 0; //reset output to allow PID 
+              pwm_set_gpio_level(clockwise, 48826);
+              pwm_set_gpio_level(anticlockwise, 0);
               setColour(0, 255, 255); //red
               break;
   //Large Step Anticlockwise (2)
-  case(LACW): Output = 0; //resets ki to reduce creep up
-              analogWrite(clockwise, 0);
-              analogWrite(anticlockwise, 255);
+  case(LACW): Output = 0; //reset output to allow PID 
+              pwm_set_gpio_level(clockwise, 0);
+              pwm_set_gpio_level(anticlockwise, 48826);
               setColour(0, 255, 255); //red
               break;
   //Full rotation Step Clockwise (3)
-  case(FCW):  myPID.SetTunings(Fkp, Fki, Fkd);
+  case(FCW):  myPID.SetTunings(0, 0, 0);
+              myPID.SetTunings(Fkp, Fki, Fkd);
               myPID.SetControllerDirection(DIRECT);
               myPID.Compute();
-              analogWrite(clockwise, speed);
-              analogWrite(anticlockwise, 0);
+              dutyCycleSet();
+              pwm_set_gpio_level(clockwise, cwLevel);  // Set the new PWM duty cycle for PWM_PIN1
+              pwm_set_gpio_level(anticlockwise, 0);
               setColour(0, 255, 255); //red
               break;
   //Full rotation Step Anticlockwise (4)
-  case(FACW): myPID.SetTunings(Fkp, Fki, Fkd);
+  case(FACW): myPID.SetTunings(0, 0, 0);
+              myPID.SetTunings(Fkp, Fki, Fkd);
               myPID.SetControllerDirection(REVERSE);
               myPID.Compute();
-              analogWrite(clockwise, 0);
-              analogWrite(anticlockwise, speed);
+              dutyCycleSet();
+              pwm_set_gpio_level(clockwise, 0);
+              pwm_set_gpio_level(anticlockwise, acwLevel);  // Set the new PWM duty cycle for PWM_PIN2
               setColour(0, 255, 255); //red
               break;  
   //Delay Before Full rotation Step Clockwise (5)
-  case(DELAY_FCW):
+  case(DELAY_FCW):              
               if(millis() - FCWdelayStart >= delayInterval){ //check whether interval time has passed
                 motorSwitch = FCW; //set 360 rotation values if time passed
               } else {
                 // Keep the motor in brake mode during the delay
-                digitalWrite(clockwise, 1);
-                digitalWrite(anticlockwise, 1);
+                pwm_set_gpio_level(clockwise, 48826);
+                pwm_set_gpio_level(anticlockwise, 48826);
               }
               break;
   //Delay Before Full rotation Step Antilockwise (6)
@@ -712,8 +728,8 @@ void calibrateMotorControl()
                 motorSwitch = FACW; //set 360 rotation values if time passed
               } else {
                 // Keep the motor in brake mode during the delay
-                digitalWrite(clockwise, 1);
-                digitalWrite(anticlockwise, 1);
+                pwm_set_gpio_level(clockwise, 48826);
+                pwm_set_gpio_level(anticlockwise, 48826);
               }
               break;
     } 
@@ -864,9 +880,9 @@ void excelPlotting()
   unsigned long currentTime = millis(); //stamp of time since arduino started up
   if(currentTime >= serialStoredTimeStamp + 100){ //alter number for delay time wanted
     serialStoredTimeStamp = currentTime; //stores current value to be compared with next measured value
+  */
   Serial.print(micros() / 1e6);
   Serial.print(":");
-  */
   Serial.print(Setpoint);
   Serial.print(":");
   Serial.print(Feedback);
@@ -875,14 +891,11 @@ void excelPlotting()
   Serial.print(":");
   Serial.print(currentSenseRead);
   Serial.print(":");
-  Serial.print(i);
-  Serial.print(":");
   Serial.print(motorSwitch);
   Serial.print(":");
-  Serial.print(digitalRead(anticlockwise));
-  Serial.print(":");
-  Serial.println(digitalRead(clockwise));
-  //}
+  Serial.println(arrayComplete);
+
+  //  }
 }
 
 
